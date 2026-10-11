@@ -12,6 +12,7 @@ ffi.cdef[[
 ]]
 
 local CLOCK_MONOTONIC = 1
+local EINTR = 4
 local INPUT_ENABLED = os.getenv("CTO_ENABLE_INPUT") == "1"
 local MAX_INPUT_DURATION = 3
 local COMMAND_INTERVAL = 2
@@ -38,11 +39,14 @@ local function Sleep(Duration)
     local Seconds = math.floor(Duration)
     local Nanoseconds = math.floor((Duration - Seconds) * 1000000000)
     local Request = ffi.new("struct timespec[1]")
+    local Remaining = ffi.new("struct timespec[1]")
     Request[0].tv_sec = Seconds
     Request[0].tv_nsec = Nanoseconds
-    while ffi.C.nanosleep(Request, Request) ~= 0 do
-        -- Retry with the remaining duration written by nanosleep.
-        if Request[0].tv_sec == 0 and Request[0].tv_nsec == 0 then break end
+
+    while ffi.C.nanosleep(Request, Remaining) ~= 0 do
+        if ffi.errno() ~= EINTR then error("nanosleep failed") end
+        Request[0].tv_sec = Remaining[0].tv_sec
+        Request[0].tv_nsec = Remaining[0].tv_nsec
     end
 end
 
