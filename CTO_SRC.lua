@@ -57,7 +57,7 @@ local KEYEVENTF_KEYUP = 0x0002
 local KEYEVENTF_SCANCODE = 0x0008
 local MOUSEEVENTF_MOVE = 0x0001
 local MAX_INPUT_DURATION = 3
-local MAX_MOUSE_MOVE = 500
+local MOUSE_TURN_UNITS_PER_SECOND = 500
 
 local VK_W = 0x11
 local VK_A = 0x1E
@@ -92,7 +92,6 @@ end
 -- Mouse motion is a one-shot event and does not require key-up cleanup.
 local function SendMouseMove(DeltaX)
     DeltaX = math.floor(DeltaX)
-    DeltaX = math.max(-MAX_MOUSE_MOVE, math.min(MAX_MOUSE_MOVE, DeltaX))
     if DeltaX == 0 then return end
 
     local Input = ffi.new("INPUT[1]")
@@ -108,6 +107,21 @@ local function SendMouseMove(DeltaX)
     if Result ~= 1 then
         error("SendInput mouse movement failed")
     end
+end
+
+--// Time-Based Mouse Turning \--
+-- The command argument is duration in seconds; turn speed is calibrated separately.
+local ActiveMouseTurn = nil
+
+local function StartMouseTurn(Direction, Duration)
+    Duration = math.max(0, math.min(Duration, MAX_INPUT_DURATION))
+    local StartTime = NowMs()
+    ActiveMouseTurn = {
+        Direction = Direction,
+        ExpirationTime = StartTime + (Duration * 1000),
+        LastUpdateTime = StartTime,
+        Remainder = 0
+    }
 end
 
 local ActiveInputs = {}
@@ -145,8 +159,29 @@ local function StartInput(Name, ScanCode, Duration)
     }
 end
 
+local function UpdateMouseTurn(CurrentTime)
+    local Turn = ActiveMouseTurn
+    if not Turn then return end
+
+    local TurnEndTime = math.min(CurrentTime, Turn.ExpirationTime)
+    local ElapsedMs = math.max(0, TurnEndTime - Turn.LastUpdateTime)
+    local ExactMovement = (ElapsedMs * MOUSE_TURN_UNITS_PER_SECOND / 1000) + Turn.Remainder
+    local Movement = math.floor(ExactMovement)
+    Turn.Remainder = ExactMovement - Movement
+    Turn.LastUpdateTime = TurnEndTime
+
+    if Movement > 0 then
+        SendMouseMove(Movement * Turn.Direction)
+    end
+
+    if CurrentTime >= Turn.ExpirationTime then
+        ActiveMouseTurn = nil
+    end
+end
+
 local function UpdateInputs()
     local CurrentTime = NowMs()
+    UpdateMouseTurn(CurrentTime)
     for Name, Input in pairs(ActiveInputs) do
         if CurrentTime >= Input.ExpirationTime then
             SendKey(Input.ScanCode, true)
@@ -168,8 +203,8 @@ local function PressInput(ScanCode)
 end
 
 --// Command Parsing \\--
--- !l / !r take relative mouse units, not seconds.
--- Other timed keyboard actions remain capped at MAX_INPUT_DURATION.
+-- !l / !r take durations in seconds, just like movement commands.
+-- Mouse turn speed is controlled by MOUSE_TURN_UNITS_PER_SECOND.
 local function ParseCommand(Command)
     local Action, ArgumentText = Command:match("^!(%w+)%s*([%d%.]*)$")
     if not Action then return end
@@ -182,9 +217,9 @@ local function ParseCommand(Command)
     end
 
     if Action == "l" and Argument then
-        SendMouseMove(-math.min(math.floor(Argument), MAX_MOUSE_MOVE))
+        StartMouseTurn(-1, Argument)
     elseif Action == "r" and Argument then
-        SendMouseMove(math.min(math.floor(Argument), MAX_MOUSE_MOVE))
+        StartMouseTurn(1, Argument)
     elseif Action == "w" and Argument then
         StartInput("W", VK_W, Argument)
     elseif Action == "a" and Argument then
@@ -219,18 +254,18 @@ local function ParseCommand(Command)
 end
 
 --// Fake Chat Test \\--
--- Mouse turn values are relative movement units; calibrate them in-game.
+-- Mouse turn values are durations in seconds. Adjust MOUSE_TURN_UNITS_PER_SECOND to calibrate turn speed.
 local Commands = {
     "!w 1.5",
-    "!l 80",
+    "!l 1.5",
     "!shoot 1",
-    "!r 140",
+    "!r 2",
     "!shoot 1",
-    "!r 40",
+    "!r 1",
     "!w 1.5",
     "!s 1",
     "!d 1",
-    "!l 40",
+    "!l 1",
 }
 
 local COMMAND_INTERVAL = 2
@@ -240,7 +275,7 @@ local function RunTest()
     print("Starting in 5 seconds...")
     Sleep(5)
     print("Fake chat started.")
-    print("Mouse turning uses relative SendInput movement; calibrate values in-game.")
+    print("Mouse turning is time-based; tune MOUSE_TURN_UNITS_PER_SECOND if needed.")
 
     local StartTime = NowMs()
     local EndTime = StartTime + (TEST_DURATION * 1000)
