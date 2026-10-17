@@ -276,6 +276,7 @@ local function RunTest()
     Sleep(5)
     print("Fake chat started.")
     print("Mouse turning is time-based; tune MOUSE_TURN_UNITS_PER_SECOND if needed.")
+    print("Using a 1 ms input-loop sleep to reduce uneven mouse-motion steps.")
 
     local StartTime = NowMs()
     local EndTime = StartTime + (TEST_DURATION * 1000)
@@ -294,7 +295,7 @@ local function RunTest()
             NextCommandTime = CurrentTime + (COMMAND_INTERVAL * 1000)
         end
 
-        Sleep(0.01)
+        Sleep(0.001)
     end
 end
 
