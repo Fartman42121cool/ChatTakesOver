@@ -35,15 +35,32 @@ ffi.cdef[[
 
     unsigned int SendInput(unsigned int cInputs, INPUT* pInputs, int cbSize);
     void Sleep(unsigned long dwMilliseconds);
-    ULONGLONG GetTickCount64(void);
+    typedef struct {
+        long long QuadPart;
+    } LARGE_INTEGER;
+
+    int QueryPerformanceCounter(LARGE_INTEGER* lpPerformanceCount);
+    int QueryPerformanceFrequency(LARGE_INTEGER* lpFrequency);
 ]]
 
 local user32 = ffi.load("user32")
 local kernel32 = ffi.load("kernel32")
 
+local TimerFrequency = ffi.new("LARGE_INTEGER[1]")
+assert(
+    kernel32.QueryPerformanceFrequency(TimerFrequency) ~= 0,
+    "QueryPerformanceFrequency failed"
+)
+local TicksPerSecond = tonumber(TimerFrequency[0].QuadPart)
+local TimerCounter = ffi.new("LARGE_INTEGER[1]")
+
 --// Timing \\--
 local function NowMs()
-    return tonumber(kernel32.GetTickCount64())
+    if kernel32.QueryPerformanceCounter(TimerCounter) == 0 then
+        error("QueryPerformanceCounter failed")
+    end
+
+    return tonumber(TimerCounter[0].QuadPart) * 1000 / TicksPerSecond
 end
 
 local function Sleep(Duration)
@@ -56,9 +73,11 @@ local INPUT_KEYBOARD = 1
 local KEYEVENTF_KEYUP = 0x0002
 local KEYEVENTF_SCANCODE = 0x0008
 local MOUSEEVENTF_MOVE = 0x0001
+local MOUSEEVENTF_LEFTDOWN = 0x0002
+local MOUSEEVENTF_LEFTUP = 0x0004
 local MAX_INPUT_DURATION = 3
 local MOUSE_TURN_UNITS_PER_SECOND = 500
-local MOUSE_TURN_INTERVAL_MS = 10
+local MOUSE_TURN_INTERVAL_MS = 2
 
 local VK_W = 0x11
 local VK_A = 0x1E
@@ -86,6 +105,22 @@ local function SendKey(ScanCode, IsKeyUp)
     local Result = user32.SendInput(1, Input, ffi.sizeof("INPUT"))
     if Result ~= 1 then
         error("SendInput keyboard event failed")
+    end
+end
+
+local function SendMouseButton(IsButtonDown)
+    local Input = ffi.new("INPUT[1]")
+    Input[0].type = INPUT_MOUSE
+    Input[0].mi.dx = 0
+    Input[0].mi.dy = 0
+    Input[0].mi.mouseData = 0
+    Input[0].mi.dwFlags = IsButtonDown and MOUSEEVENTF_LEFTDOWN or MOUSEEVENTF_LEFTUP
+    Input[0].mi.time = 0
+    Input[0].mi.dwExtraInfo = 0
+
+    local Result = user32.SendInput(1, Input, ffi.sizeof("INPUT"))
+    if Result ~= 1 then
+        error("SendInput mouse button event failed")
     end
 end
 
@@ -132,7 +167,13 @@ local ActiveInputs = {}
 local function ReleaseAllInputs()
     local Errors = {}
     for Name, Input in pairs(ActiveInputs) do
-        local Ok, ErrorMessage = pcall(SendKey, Input.ScanCode, true)
+        local Ok, ErrorMessage = pcall(function()
+            if Input.InputType == "MouseButton" then
+                SendMouseButton(false)
+            else
+                SendKey(Input.ScanCode, true)
+            end
+        end)
         if not Ok then
             Errors[#Errors + 1] = Name .. ": " .. tostring(ErrorMessage)
         end
@@ -156,7 +197,27 @@ local function StartInput(Name, ScanCode, Duration)
 
     SendKey(ScanCode, false)
     ActiveInputs[Name] = {
+        InputType = "Keyboard",
         ScanCode = ScanCode,
+        ExpirationTime = ExpirationTime
+    }
+end
+
+local function StartMouseButton(Name, Duration)
+    Duration = math.max(0, math.min(Duration, MAX_INPUT_DURATION))
+    local ExpirationTime = NowMs() + (Duration * 1000)
+    local Input = ActiveInputs[Name]
+
+    if Input then
+        if ExpirationTime > Input.ExpirationTime then
+            Input.ExpirationTime = ExpirationTime
+        end
+        return
+    end
+
+    SendMouseButton(true)
+    ActiveInputs[Name] = {
+        InputType = "MouseButton",
         ExpirationTime = ExpirationTime
     }
 end
@@ -192,7 +253,11 @@ local function UpdateInputs()
     UpdateMouseTurn(CurrentTime)
     for Name, Input in pairs(ActiveInputs) do
         if CurrentTime >= Input.ExpirationTime then
-            SendKey(Input.ScanCode, true)
+            if Input.InputType == "MouseButton" then
+                SendMouseButton(false)
+            else
+                SendKey(Input.ScanCode, true)
+            end
             ActiveInputs[Name] = nil
         end
     end
@@ -203,7 +268,20 @@ local function PressInput(ScanCode)
     local Ok, ErrorMessage = pcall(SendKey, ScanCode, true)
     if not Ok then
         ActiveInputs["EMERGENCY_" .. tostring(ScanCode)] = {
+            InputType = "Keyboard",
             ScanCode = ScanCode,
+            ExpirationTime = NowMs()
+        }
+        error(ErrorMessage)
+    end
+end
+
+local function PressMouseButton()
+    SendMouseButton(true)
+    local Ok, ErrorMessage = pcall(SendMouseButton, false)
+    if not Ok then
+        ActiveInputs["EMERGENCY_MOUSE_LEFT"] = {
+            InputType = "MouseButton",
             ExpirationTime = NowMs()
         }
         error(ErrorMessage)
@@ -240,9 +318,9 @@ local function ParseCommand(Command)
         PressInput(VK_E)
     elseif Action == "shoot" then
         if Argument then
-            StartInput("SHOOT", VK_CTRL, Argument)
+            StartMouseButton("SHOOT", Argument)
         else
-            PressInput(VK_CTRL)
+            PressMouseButton()
         end
     elseif Action == "1" then
         PressInput(VK_1)
@@ -284,7 +362,7 @@ local function RunTest()
     Sleep(5)
     print("Fake chat started.")
     print("Mouse turning is time-based; tune MOUSE_TURN_UNITS_PER_SECOND if needed.")
-    print("Mouse motion is emitted on a 10 ms cadence to avoid tiny alternating movement events.")
+    print("Mouse motion is emitted on a 2 ms cadence for smoother turns.")
 
     local StartTime = NowMs()
     local EndTime = StartTime + (TEST_DURATION * 1000)
