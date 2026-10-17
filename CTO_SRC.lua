@@ -4,6 +4,7 @@ ffi.cdef[[
     typedef unsigned short WORD;
     typedef unsigned long DWORD;
     typedef unsigned long long ULONG_PTR;
+    typedef unsigned long long ULONGLONG;
 
     typedef struct {
         WORD wVk;
@@ -29,11 +30,24 @@ ffi.cdef[[
     );
 
     void Sleep(unsigned long dwMilliseconds);
+    ULONGLONG GetTickCount64(void);
 ]]
 
 local user32 = ffi.load("user32")
 local kernel32 = ffi.load("kernel32")
 
+--// Timing \\--
+-- GetTickCount64 measures real elapsed time, including time spent sleeping.
+local function NowMs()
+    return tonumber(kernel32.GetTickCount64())
+end
+
+local function Sleep(Duration)
+    local Milliseconds = math.max(0, math.floor(Duration * 1000))
+    kernel32.Sleep(Milliseconds)
+end
+
+--// Input Configuration \\--
 local INPUT_KEYBOARD = 1
 local KEYEVENTF_KEYUP = 0x0002
 local KEYEVENTF_SCANCODE = 0x0008
@@ -81,17 +95,31 @@ local function SendKey(ScanCode, IsKeyUp)
     end
 end
 
-local function Sleep(Duration)
-    kernel32.Sleep(Duration * 1000)
-end
-
 local ActiveInputs = {}
 
+--// Input Cleanup \\--
+local function ReleaseAllInputs()
+    local Errors = {}
+
+    for Name, Input in pairs(ActiveInputs) do
+        local Ok, ErrorMessage = pcall(SendKey, Input.ScanCode, true)
+
+        if not Ok then
+            Errors[#Errors + 1] = Name .. ": " .. tostring(ErrorMessage)
+        end
+
+        -- Clear our state even if Windows rejected the release.
+        ActiveInputs[Name] = nil
+    end
+
+    return Errors
+end
+
+--// Input Scheduling \\--
 local function StartInput(Name, ScanCode, Duration)
-    Duration = math.min(Duration, MAX_INPUT_DURATION)
+    Duration = math.max(0, math.min(Duration, MAX_INPUT_DURATION))
 
-    local ExpirationTime = os.clock() + Duration
-
+    local ExpirationTime = NowMs() + (Duration * 1000)
     local Input = ActiveInputs[Name]
 
     if Input then
@@ -111,12 +139,11 @@ local function StartInput(Name, ScanCode, Duration)
 end
 
 local function UpdateInputs()
-    local CurrentTime = os.clock()
+    local CurrentTime = NowMs()
 
     for Name, Input in pairs(ActiveInputs) do
         if CurrentTime >= Input.ExpirationTime then
             SendKey(Input.ScanCode, true)
-
             ActiveInputs[Name] = nil
         end
     end
@@ -124,9 +151,20 @@ end
 
 local function PressInput(ScanCode)
     SendKey(ScanCode, false)
-    SendKey(ScanCode, true)
+
+    local Ok, ErrorMessage = pcall(SendKey, ScanCode, true)
+
+    if not Ok then
+        -- Keep track of a key whose release failed so final cleanup can retry.
+        ActiveInputs["EMERGENCY_" .. tostring(ScanCode)] = {
+            ScanCode = ScanCode,
+            ExpirationTime = NowMs()
+        }
+        error(ErrorMessage)
+    end
 end
 
+--// Command Parsing \\--
 local function ParseCommand(Command)
     local Action, DurationText = Command:match("^!(%w+)%s*([%d%.]*)$")
 
@@ -141,7 +179,7 @@ local function ParseCommand(Command)
     if DurationText ~= "" then
         Duration = tonumber(DurationText)
 
-        if not Duration then
+        if not Duration or Duration < 0 then
             return
         end
 
@@ -199,6 +237,7 @@ local function ParseCommand(Command)
     end
 end
 
+--// Fake Chat Test \\--
 local Commands = {
     "!w 3",
     "!l 1",
@@ -215,38 +254,51 @@ local Commands = {
 local COMMAND_INTERVAL = 2
 local TEST_DURATION = 30
 
-print("Starting in 5 seconds...")
+local function RunTest()
+    print("Starting in 5 seconds...")
+    Sleep(5)
 
-Sleep(5)
+    print("Fake chat started.")
 
-print("Fake chat started.")
+    local StartTime = NowMs()
+    local EndTime = StartTime + (TEST_DURATION * 1000)
+    local NextCommandTime = StartTime
+    local CommandIndex = 1
 
-local StartTime = os.clock()
-local NextCommandTime = StartTime
-local CommandIndex = 1
+    while NowMs() < EndTime do
+        UpdateInputs()
 
-while os.clock() - StartTime < TEST_DURATION do
-    UpdateInputs()
+        local CurrentTime = NowMs()
 
-    local CurrentTime = os.clock()
+        if CurrentTime >= NextCommandTime and CommandIndex <= #Commands then
+            local Command = Commands[CommandIndex]
 
-    if CurrentTime >= NextCommandTime and CommandIndex <= #Commands then
-        local Command = Commands[CommandIndex]
+            print("Chat:", Command)
+            ParseCommand(Command)
 
-        print("Chat:", Command)
+            CommandIndex = CommandIndex + 1
+            NextCommandTime = CurrentTime + (COMMAND_INTERVAL * 1000)
+        end
 
-        ParseCommand(Command)
-
-        CommandIndex = CommandIndex + 1
-        NextCommandTime = CurrentTime + COMMAND_INTERVAL
+        Sleep(0.01)
     end
-
-    Sleep(0.01)
 end
 
-for Name, Input in pairs(ActiveInputs) do
-    SendKey(Input.ScanCode, true)
-    ActiveInputs[Name] = nil
+-- Always attempt to release held keys, even if the test loop errors.
+local Ok, ErrorMessage = xpcall(RunTest, debug.traceback)
+local CleanupErrors = ReleaseAllInputs()
+
+if not Ok then
+    print("ERROR: Fake chat stopped unexpectedly.")
+    print(ErrorMessage)
 end
 
-print("Fake chat finished.")
+for _, CleanupError in ipairs(CleanupErrors) do
+    print("WARNING: Could not release input:", CleanupError)
+end
+
+if Ok then
+    print("Fake chat finished.")
+else
+    print("Fake chat stopped after an error.")
+end
