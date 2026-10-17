@@ -58,6 +58,7 @@ local KEYEVENTF_SCANCODE = 0x0008
 local MOUSEEVENTF_MOVE = 0x0001
 local MAX_INPUT_DURATION = 3
 local MOUSE_TURN_UNITS_PER_SECOND = 500
+local MOUSE_TURN_INTERVAL_MS = 10
 
 local VK_W = 0x11
 local VK_A = 0x1E
@@ -120,6 +121,7 @@ local function StartMouseTurn(Direction, Duration)
         Direction = Direction,
         ExpirationTime = StartTime + (Duration * 1000),
         LastUpdateTime = StartTime,
+        NextUpdateTime = StartTime + MOUSE_TURN_INTERVAL_MS,
         Remainder = 0
     }
 end
@@ -164,14 +166,20 @@ local function UpdateMouseTurn(CurrentTime)
     if not Turn then return end
 
     local TurnEndTime = math.min(CurrentTime, Turn.ExpirationTime)
-    local ElapsedMs = math.max(0, TurnEndTime - Turn.LastUpdateTime)
-    local ExactMovement = (ElapsedMs * MOUSE_TURN_UNITS_PER_SECOND / 1000) + Turn.Remainder
-    local Movement = math.floor(ExactMovement)
-    Turn.Remainder = ExactMovement - Movement
-    Turn.LastUpdateTime = TurnEndTime
 
-    if Movement > 0 then
-        SendMouseMove(Movement * Turn.Direction)
+    -- Emit integer movement on a steady cadence instead of alternating
+    -- tiny one-unit events with loop iterations that produce no movement.
+    if TurnEndTime >= Turn.NextUpdateTime or CurrentTime >= Turn.ExpirationTime then
+        local ElapsedMs = math.max(0, TurnEndTime - Turn.LastUpdateTime)
+        local ExactMovement = (ElapsedMs * MOUSE_TURN_UNITS_PER_SECOND / 1000) + Turn.Remainder
+        local Movement = math.floor(ExactMovement)
+        Turn.Remainder = ExactMovement - Movement
+        Turn.LastUpdateTime = TurnEndTime
+        Turn.NextUpdateTime = CurrentTime + MOUSE_TURN_INTERVAL_MS
+
+        if Movement > 0 then
+            SendMouseMove(Movement * Turn.Direction)
+        end
     end
 
     if CurrentTime >= Turn.ExpirationTime then
@@ -276,7 +284,7 @@ local function RunTest()
     Sleep(5)
     print("Fake chat started.")
     print("Mouse turning is time-based; tune MOUSE_TURN_UNITS_PER_SECOND if needed.")
-    print("Using a 1 ms input-loop sleep to reduce uneven mouse-motion steps.")
+    print("Mouse motion is emitted on a 10 ms cadence to avoid tiny alternating movement events.")
 
     local StartTime = NowMs()
     local EndTime = StartTime + (TEST_DURATION * 1000)
